@@ -69,13 +69,35 @@ pnpx @modelcontextprotocol/inspector@latest
 
 ## 客户端连接与首次扫码
 
-客户端需支持 Streamable HTTP，并在每次请求中携带：
+客户端需支持 Streamable HTTP，并在每次请求中携带 Bearer 凭证。当前服务同时接受两种凭证：
+
+| Bearer 中的值 | 校验方式 |
+| --- | --- |
+| API Key | 与 `ALLOWED_API_KEYS` 中的密钥匹配 |
+| OAuth `access_token` | 查询令牌记录，检查有效期、权限及对应 API Key 是否仍有效 |
+
+直接使用 API Key 时，请求头为：
 
 ```http
 Authorization: Bearer YOUR_API_KEY
 ```
 
-只发送数组中的一个 Key。未提供或不匹配会返回 **401**；`/health` 无需认证。
+只发送 `ALLOWED_API_KEYS` 数组中的一个 Key；`Authorization: Bearer <API_key>` 仍然生效。
+使用 OAuth 授权后获得的 `access_token` 时，请求头为：
+
+```http
+Authorization: Bearer YOUR_ACCESS_TOKEN
+```
+
+OAuth `access_token` 是服务随机生成的独立凭证，与 API Key 不相等，也不是 API Key 的编码结果。
+API Key 用于所有者在授权页确认授权，也可以直接作为 Bearer 凭证；OAuth 客户端后续使用
+`access_token` 调用工具，无需持有该 API Key。
+
+`ACCESS_TOKEN_EXPIRE_SECONDS` 只控制新签发的 OAuth `access_token`，不控制 API Key 的有效期。
+API Key 没有时间过期限制；从 `ALLOWED_API_KEYS` 中移除并重新部署或重启服务加载新配置后，
+该 Key 以及通过它授权出来的 `access_token` 都会失效，包括永久有效的 token。
+
+未提供凭证、凭证无效或 OAuth token 已过期时会返回 **401**；`/health` 无需认证。
 
 ### ChatGPT / Codex 云端插件认证
 
@@ -88,7 +110,7 @@ Railway 自动提供 `RAILWAY_PUBLIC_DOMAIN` 时，服务默认使用该域名�
 
 客户端选择 OAuth，填写现有 HTTPS `/mcp` URL。连接时会打开本服务的授权页，
 显示客户端自报名称、实际回调地址和设备控制权限。确认客户端可信后输入现有 API Key，
-点击“授权连接”。API Key 只发送到本服务，不传给客户端；客户端收到专属短期令牌。
+点击“授权连接”。API Key 只发送到本服务，不传给客户端；客户端收到专属 `access_token`。
 这次授权与后续米家账号扫码登录是两个独立步骤。
 
 服务提供标准认证发现、动态客户端注册、S256 PKCE 和撤销端点。
