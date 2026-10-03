@@ -123,7 +123,7 @@ async def test_discovery_existing_keys_and_oauth_only_after_owner_consent(tmp_pa
         assert token.status_code == 200, token.text
         token = token.json()
         assert "refresh_token" not in token
-        assert token["expires_in"] == 3600
+        assert token["expires_in"] == 2592000
         tools = await rpc(client, "tools/list", authorization="Bearer " + token["access_token"])
         assert len(tools.json()["result"]["tools"]) == 14
         assert (await client.post("/token", data=data)).status_code == 401

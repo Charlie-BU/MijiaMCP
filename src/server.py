@@ -31,7 +31,7 @@ class Settings:
     data_dir: Path = Path("./.data")
     port: int = 8080
     public_url: str | None = None
-    access_token_expire_seconds: int = 3600
+    access_token_expire_seconds: int = 2592000
 
     def __post_init__(self) -> None:
         """校验 API Key 和端口，阻止无效配置启动服务。"""
@@ -70,7 +70,7 @@ class Settings:
         except ValueError:
             raise ValueError("APP_PORT must be an integer between 1 and 65535") from None
         try:
-            token_expiry = int(os.getenv("ACCESS_TOKEN_EXPIRE_SECONDS", "3600"))
+            token_expiry = int(os.getenv("ACCESS_TOKEN_EXPIRE_SECONDS", "2592000"))
         except ValueError:
             raise ValueError(
                 "ACCESS_TOKEN_EXPIRE_SECONDS must be -1 or a positive integer"

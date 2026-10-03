@@ -78,7 +78,7 @@ class OwnerOAuthProvider(OAuthProvider):
         data_dir: Path,
         allowed_api_keys: tuple[str, ...],
         *,
-        access_token_expire_seconds: int = 3600,
+        access_token_expire_seconds: int = 2592000,
     ):
         if (
             type(access_token_expire_seconds) is not int
