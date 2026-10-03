@@ -12,9 +12,11 @@ from pathlib import Path
 
 import mijiaAPI.mcp_server as upstream
 from fastmcp import FastMCP
-from fastmcp.server.auth import AccessToken, TokenVerifier
+from fastmcp.server.auth import AccessToken, MultiAuth, TokenVerifier
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+from oauth import SCOPE, OwnerOAuthProvider
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,7 @@ class Settings:
     allowed_api_keys: tuple[str, ...] = field(repr=False)
     data_dir: Path = Path("./.data")
     port: int = 8080
+    public_url: str | None = None
 
     def __post_init__(self) -> None:
         """校验 API Key 和端口，阻止无效配置启动服务。"""
@@ -60,6 +63,12 @@ class Settings:
             allowed_api_keys=tuple(keys),
             data_dir=Path(env.get("MIJIA_DATA_DIR", "./.data")),
             port=port,
+            public_url=env.get("MIJIA_PUBLIC_URL")
+            or (
+                "https://" + env["RAILWAY_PUBLIC_DOMAIN"]
+                if env.get("RAILWAY_PUBLIC_DOMAIN")
+                else None
+            ),
         )
 
 
@@ -85,7 +94,7 @@ class APIKeyVerifier(TokenVerifier):
             token=token,
             client_id="myhome-owner",
             subject="myhome-owner",
-            scopes=[],
+            scopes=[SCOPE],
         )
 
 
@@ -108,7 +117,16 @@ def create_server(settings: Settings) -> FastMCP:
     finally:
         upstream.mcp.run = original_run
 
-    server = FastMCP("MyHome Mijia", auth=APIKeyVerifier(settings.allowed_api_keys))
+    verifier = APIKeyVerifier(settings.allowed_api_keys)
+    auth = verifier
+    if settings.public_url:
+        auth = MultiAuth(
+            server=OwnerOAuthProvider(
+                settings.public_url, settings.data_dir, settings.allowed_api_keys
+            ),
+            verifiers=[verifier],
+        )
+    server = FastMCP("MyHome Mijia", auth=auth)
     server.mount(upstream.mcp)
 
     @server.custom_route("/health", methods=["GET"])

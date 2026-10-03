@@ -5,6 +5,7 @@
 .data/
 data/
 auth.json
+oauth.sqlite3*
 **/auth.json
 __pycache__/
 *.py[cod]

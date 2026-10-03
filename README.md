@@ -1,6 +1,6 @@
 # MijiaMCP
 
-基于 [mijiaAPI](https://github.com/Do1e/mijia-api) 提供米家 Streamable HTTP MCP 服务，支持通过 Agent 查询和控制设备，使用 API Key 认证、uv 管理 Python 依赖。
+基于 [mijiaAPI](https://github.com/Do1e/mijia-api) 提供米家 Streamable HTTP MCP 服务，支持通过 Agent 查询和控制设备，使用 OAuth 或 API Key 认证、uv 管理 Python 依赖。
 
 ## 生成随机 API Key
 
@@ -75,7 +75,30 @@ pnpx @modelcontextprotocol/inspector@latest
 Authorization: Bearer YOUR_API_KEY
 ```
 
-只发送数组中的一个 Key，无需 OAuth。未提供或不匹配会返回 **401**；`/health` 无需认证。
+只发送数组中的一个 Key。未提供或不匹配会返回 **401**；`/health` 无需认证。
+
+### ChatGPT / Codex 云端插件认证
+
+云端插件的通用 `mcp.json` 只包含服务器 URL，不包含 `Authorization` 或密钥。
+Codex 会过滤插件包中的 `Authorization`，应通过客户端的 OAuth 连接保存认证。
+
+服务设置 `MIJIA_PUBLIC_URL` 为完整 HTTPS 源地址（不含 `/mcp`），即可启用 OAuth。
+Railway 自动提供 `RAILWAY_PUBLIC_DOMAIN` 时，服务默认使用该域名，无需额外配置。
+本地 OAuth 调试可设置 `MIJIA_PUBLIC_URL=http://localhost:8080`。
+
+客户端选择 OAuth，填写现有 HTTPS `/mcp` URL。连接时会打开本服务的授权页，
+显示客户端自报名称、实际回调地址和设备控制权限。确认客户端可信后输入现有 API Key，
+点击“授权连接”。API Key 只发送到本服务，不传给客户端；客户端收到专属短期令牌。
+这次授权与后续米家账号扫码登录是两个独立步骤。
+
+服务提供标准认证发现、动态客户端注册、S256 PKCE、撤销和刷新端点。
+访问令牌有效期为 1 小时，刷新令牌为 30 天；刷新令牌轮换，重放会撤销整组令牌。
+令牌绑定本服务的 `/mcp` 资源和 `mijia` scope。现有 Key 客户端保持兼容。
+删除 `ALLOWED_API_KEYS` 中某个 Key 后，该 Key 授权的 OAuth 令牌也会失效。
+
+OAuth 状态持久化到 `MIJIA_DATA_DIR/oauth.sqlite3`，权限为 `0600`；令牌和授权码只存摘要。
+Railway 需保持原有 `/data` Volume 挂载，确保重启后保留客户端注册与授权状态。
+不要提交该数据库、米家凭证或真实 API Key 到仓库或插件包。
 
 首次使用时，在 Inspector 的 **Tools** 页面依次执行以下工具，参数均为 `{}`：
 

@@ -13,7 +13,7 @@ ENV PYTHONUNBUFFERED=1 \
 COPY pyproject.toml uv.lock .
 RUN uv sync --locked --no-dev --no-install-project && uv pip check
 
-COPY src/server.py ./src/server.py
+COPY src/ ./src/
 ENV PATH="/app/.venv/bin:$PATH"
 
 EXPOSE 8080
