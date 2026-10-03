@@ -99,6 +99,20 @@ async def test_verifier_and_settings_do_not_expose_plaintext_key():
     assert await verifier.verify_token(TEST_KEY + "extra") is None
 
 
+def test_railway_requires_persistent_state():
+    env = {"ALLOWED_API_KEYS": json.dumps(TEST_KEYS), "RAILWAY_ENVIRONMENT_ID": "test-env"}
+    with pytest.raises(ValueError, match="persistent volume"):
+        Settings.from_env(env)
+    env["RAILWAY_VOLUME_MOUNT_PATH"] = "/data"
+    assert Settings.from_env(env).data_dir == Path("/data")
+    for path in ["./.data", "/data-other", "/data/../temporary"]:
+        with pytest.raises(ValueError, match="inside the Railway persistent volume"):
+            Settings.from_env({**env, "MIJIA_DATA_DIR": path})
+    assert Settings.from_env({**env, "MIJIA_DATA_DIR": "/data/mijia"}).data_dir == Path(
+        "/data/mijia"
+    )
+
+
 @pytest.mark.parametrize("authorization", [None, "Bearer wrong", f"Basic {TEST_KEY}"])
 async def test_all_mcp_requests_require_correct_bearer_key(tmp_path, authorization):
     """验证未授权请求无法初始化会话、发现工具或发起登录。"""

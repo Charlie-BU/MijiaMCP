@@ -100,6 +100,12 @@ OAuth 状态持久化到 `MIJIA_DATA_DIR/oauth.sqlite3`，权限为 `0600`；令
 Railway 需保持原有 `/data` Volume 挂载，确保重启后保留客户端注册与授权状态。
 不要提交该数据库、米家凭证或真实 API Key 到仓库或插件包。
 
+在 Railway 中创建挂载到 `/data` 的 Volume，并将 `MIJIA_DATA_DIR` 设置为 `/data`。
+不要沿用本地开发的 `./.data`。省略该变量时服务会采用 Railway 的 Volume 挂载路径；
+在 Railway 环境缺少 Volume 或数据目录位于 Volume 外时，服务会拒绝启动，避免
+看似部署成功、随后丢失登录和 OAuth 注册。如果旧部署已丢失注册，ChatGPT 会继续
+复用原客户端 ID，需要恢复原 OAuth 数据库或重建客户端连接；重试 API Key 无法修复。
+
 #### 浏览器 OAuth 回归验证
 
 运行 `uv run --locked python scripts/oauth_browser_smoke.py`，在浏览器打开

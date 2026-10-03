@@ -59,9 +59,16 @@ class Settings:
             port = int(env.get("APP_PORT", "8080"))
         except ValueError:
             raise ValueError("APP_PORT must be an integer between 1 and 65535") from None
+        volume_path = env.get("RAILWAY_VOLUME_MOUNT_PATH")
+        data_dir = Path(env.get("MIJIA_DATA_DIR") or volume_path or "./.data")
+        if env.get("RAILWAY_ENVIRONMENT_ID"):
+            if not volume_path:
+                raise ValueError("Railway requires a persistent volume for Mijia and OAuth state")
+            if not data_dir.resolve().is_relative_to(Path(volume_path).resolve()):
+                raise ValueError("MIJIA_DATA_DIR must be inside the Railway persistent volume")
         return cls(
             allowed_api_keys=tuple(keys),
-            data_dir=Path(env.get("MIJIA_DATA_DIR", "./.data")),
+            data_dir=data_dir,
             port=port,
             public_url=env.get("MIJIA_PUBLIC_URL")
             or (
