@@ -6,6 +6,7 @@ import re
 import time
 from urllib.parse import parse_qs, urlparse
 
+import pytest
 from test_server import SECOND_KEY, TEST_KEY, TEST_KEYS, http_client, rpc
 
 from oauth import OwnerOAuthProvider, digest
@@ -56,6 +57,12 @@ async def consent_page(client, client_id, **extra):
     assert page.status_code == 200
     assert "<script>" not in page.text
     assert "frame-ancestors 'none'" in page.headers["content-security-policy"]
+    assert page.headers["referrer-policy"] == "same-origin"
+    callback = urlparse(extra.get("redirect_uri", CALLBACK))
+    assert page.headers["content-security-policy"] == (
+        f"default-src 'none'; form-action 'self' {callback.scheme}://{callback.netloc}; "
+        "frame-ancestors 'none'"
+    )
     return {
         name: re.search(rf'name="{name}" value="([^"]+)"', page.text)[1]
         for name in ["request", "csrf"]
@@ -65,7 +72,9 @@ async def consent_page(client, client_id, **extra):
 async def grant(client, client_id):
     fields = await consent_page(client, client_id)
     response = await client.post(
-        "/oauth/consent", data={**fields, "api_key": TEST_KEY, "decision": "allow"}
+        "/oauth/consent",
+        data={**fields, "api_key": TEST_KEY, "decision": "allow"},
+        headers={"Origin": BASE},
     )
     assert response.status_code == 302, response.text
     query = parse_qs(urlparse(response.headers["location"]).query)
@@ -215,6 +224,9 @@ async def test_consent_cookie_origin_denial_and_unregistered_redirects(tmp_path)
                 "/oauth/consent", data=data, headers={"Origin": "https://evil.invalid"}
             )
         ).status_code == 403
+        assert (
+            await client.post("/oauth/consent", data=data, headers={"Origin": "null"})
+        ).status_code == 403
         client.cookies.clear()
         assert (await client.post("/oauth/consent", data=data)).status_code == 403
         fields = await consent_page(client, client_id)
@@ -232,6 +244,49 @@ async def test_consent_cookie_origin_denial_and_unregistered_redirects(tmp_path)
             },
         )
         assert insecure.status_code == 400
+
+
+@pytest.mark.parametrize("decision", ["allow", "deny"])
+async def test_browser_consent_preserves_origin_and_allows_only_client_callback(tmp_path, decision):
+    callback = "https://chatgpt.com/connector/oauth/test?existing=value"
+    async with http_client(Settings(TEST_KEYS, tmp_path, public_url=BASE)) as client:
+        client_id = await register(client, callback)
+        fields = await consent_page(client, client_id, redirect_uri=callback)
+        response = await client.post(
+            "/oauth/consent",
+            data={**fields, "api_key": TEST_KEY, "decision": decision},
+            headers={"Origin": BASE},
+        )
+        assert response.status_code == 302
+        assert response.headers["referrer-policy"] == "same-origin"
+        assert response.headers["content-security-policy"] == (
+            "default-src 'none'; form-action 'self' https://chatgpt.com; frame-ancestors 'none'"
+        )
+        location = urlparse(response.headers["location"])
+        assert location.netloc == "chatgpt.com"
+        query = parse_qs(location.query)
+        assert query["existing"] == ["value"]
+        assert query["state"] == ["test-state"]
+        assert ("code" in query) == (decision == "allow")
+        assert ("error" in query) == (decision == "deny")
+        assert TEST_KEY not in response.headers["location"]
+
+
+@pytest.mark.parametrize(
+    "callback", ["https://*.example.com/callback", "https://bad;host/callback"]
+)
+async def test_registration_rejects_csp_source_metacharacters(tmp_path, callback):
+    async with http_client(Settings(TEST_KEYS, tmp_path, public_url=BASE)) as client:
+        response = await client.post(
+            "/register",
+            json={
+                "redirect_uris": [callback],
+                "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+            },
+        )
+        assert response.status_code == 400
 
 
 def test_railway_domain_enables_oauth_without_extra_credentials():

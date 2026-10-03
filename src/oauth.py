@@ -35,7 +35,10 @@ from starlette.routing import Route
 SCOPE = "mijia"
 SECURITY_HEADERS = {
     "Cache-Control": "no-store",
-    "Referrer-Policy": "no-referrer",
+    # Chromium sends Origin: null for form POSTs under no-referrer, which
+    # correctly fails our origin check. Preserve same-origin form provenance
+    # while still suppressing Referer on the cross-origin OAuth callback.
+    "Referrer-Policy": "same-origin",
     "X-Content-Type-Options": "nosniff",
     "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'",
 }
@@ -43,6 +46,20 @@ SECURITY_HEADERS = {
 
 def digest(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def consent_headers(redirect_uri: str) -> dict[str, str]:
+    """Allow only this validated client's callback in the form redirect chain."""
+    callback = urlparse(redirect_uri)
+    # Chromium applies form-action to redirects as well as the form's POST.
+    # Keep the form itself same-origin and allow its registered callback origin.
+    callback_origin = f"{callback.scheme}://{callback.netloc}"
+    return {
+        **SECURITY_HEADERS,
+        "Content-Security-Policy": (
+            f"default-src 'none'; form-action 'self' {callback_origin}; frame-ancestors 'none'"
+        ),
+    }
 
 
 class OwnerOAuthProvider(OAuthProvider):
@@ -118,6 +135,7 @@ class OwnerOAuthProvider(OAuthProvider):
                 or parsed.password
                 or parsed.fragment
                 or not parsed.hostname
+                or not re.fullmatch(r"[A-Za-z0-9.:-]+", parsed.hostname)
                 or not (
                     parsed.scheme == "https"
                     or (
@@ -199,7 +217,7 @@ class OwnerOAuthProvider(OAuthProvider):
 autocomplete="off" maxlength="4096"></label>
 <button name="decision" value="allow">授权连接</button>
 <button name="decision" value="deny" formnovalidate>拒绝</button></form></body></html>''',
-                headers=SECURITY_HEADERS,
+                headers=consent_headers(record["params"]["redirect_uri"]),
             )
             response.set_cookie(
                 f"mijia_{request_id}",
@@ -260,7 +278,9 @@ autocomplete="off" maxlength="4096"></label>
                 redirect = construct_redirect_uri(
                     str(params.redirect_uri), code=code, state=params.state
                 )
-        response = RedirectResponse(redirect, status_code=302, headers=SECURITY_HEADERS)
+        response = RedirectResponse(
+            redirect, status_code=302, headers=consent_headers(str(params.redirect_uri))
+        )
         response.delete_cookie(f"mijia_{request_id}", path="/oauth/consent")
         return response
 
