@@ -1,0 +1,144 @@
+"""通过固定 API Key 提供米家 HTTP MCP 服务。"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import os
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import mijiaAPI.mcp_server as upstream
+from fastmcp import FastMCP
+from fastmcp.server.auth import AccessToken, TokenVerifier
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+
+@dataclass(frozen=True)
+class Settings:
+    """保存服务认证、存储目录和监听端口配置。"""
+
+    # 以下均为默认值，实际启动时从环境变量加载
+    allowed_api_keys: tuple[str, ...] = field(repr=False)
+    data_dir: Path = Path("./.data")
+    port: int = 8080
+
+    def __post_init__(self) -> None:
+        """校验 API Key 和端口，阻止无效配置启动服务。"""
+        if not isinstance(self.allowed_api_keys, tuple) or not self.allowed_api_keys:
+            raise ValueError("ALLOWED_API_KEYS must be a non-empty JSON array of strings")
+        for key in self.allowed_api_keys:
+            if (
+                not isinstance(key, str)
+                or len(key) < 32
+                or any(not 33 <= ord(char) <= 126 for char in key)
+            ):
+                raise ValueError(
+                    "ALLOWED_API_KEYS entries must contain at least 32 ASCII non-space characters"
+                )
+        if not 1 <= self.port <= 65535:
+            raise ValueError("APP_PORT must be an integer between 1 and 65535")
+
+    @classmethod
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
+        """从环境变量读取服务配置。"""
+        env = os.environ if environ is None else environ
+        try:
+            keys = json.loads(env.get("ALLOWED_API_KEYS", ""))
+        except json.JSONDecodeError:
+            raise ValueError("ALLOWED_API_KEYS must be a non-empty JSON array of strings") from None
+        if not isinstance(keys, list):
+            raise ValueError("ALLOWED_API_KEYS must be a non-empty JSON array of strings")
+        try:
+            port = int(env.get("APP_PORT", "8080"))
+        except ValueError:
+            raise ValueError("APP_PORT must be an integer between 1 and 65535") from None
+        return cls(
+            allowed_api_keys=tuple(keys),
+            data_dir=Path(env.get("MIJIA_DATA_DIR", "./.data")),
+            port=port,
+        )
+
+
+class APIKeyVerifier(TokenVerifier):
+    """校验客户端提交的固定 Bearer 密钥。"""
+
+    def __init__(self, allowed_api_keys: tuple[str, ...]):
+        """保存所有允许密钥的摘要以供后续认证比较。"""
+        super().__init__()
+        self._key_digests = tuple(
+            hashlib.sha256(key.encode("utf-8")).digest() for key in allowed_api_keys
+        )
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        """恒定时间比较密钥摘要，并返回认证结果。"""
+        candidate = hashlib.sha256(token.encode("utf-8")).digest()
+        matched = False
+        for digest in self._key_digests:
+            matched |= hmac.compare_digest(candidate, digest)
+        if not matched:
+            return None
+        return AccessToken(
+            token=token,
+            client_id="myhome-owner",
+            subject="myhome-owner",
+            scopes=[],
+        )
+
+
+def _skip_stdio(**kwargs) -> None:
+    """跳过上游 stdio 启动，以复用其凭证初始化逻辑。"""
+
+
+def create_server(settings: Settings) -> FastMCP:
+    """初始化米家凭证，挂载受密钥保护的工具及健康检查。"""
+    settings.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    auth_path = settings.data_dir / "auth.json"
+    if auth_path.exists():
+        auth_path.chmod(0o600)
+
+    # 上游没有独立初始化入口，暂时跳过 stdio 启动，完成后恢复原方法。
+    original_run = upstream.mcp.run
+    upstream.mcp.run = _skip_stdio
+    try:
+        upstream.run(auth_path)
+    finally:
+        upstream.mcp.run = original_run
+
+    server = FastMCP("MyHome Mijia", auth=APIKeyVerifier(settings.allowed_api_keys))
+    server.mount(upstream.mcp)
+
+    @server.custom_route("/health", methods=["GET"])
+    async def health(request: Request) -> JSONResponse:
+        """返回进程健康状态，供 Railway 检查服务是否启动。"""
+        return JSONResponse({"status": "ok"})
+
+    return server
+
+
+def main() -> None:
+    """限制凭证文件权限并启动 HTTP MCP 服务。"""
+    os.umask(0o077)
+    try:
+        settings = Settings.from_env()
+    except ValueError as error:
+        raise SystemExit(str(error)) from None
+
+    server = create_server(settings)
+    server.run(
+        transport="http",
+        host="0.0.0.0",
+        port=settings.port,
+        path="/mcp",
+        stateless_http=True,
+        json_response=True,
+        show_banner=False,
+        log_level="INFO",
+    )
+
+
+if __name__ == "__main__":
+    main()
