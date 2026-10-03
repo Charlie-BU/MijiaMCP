@@ -135,19 +135,6 @@ Railway 需保持原有 `/data` Volume 挂载，确保重启后保留客户端�
 看似部署成功、随后丢失登录和 OAuth 注册。如果旧部署已丢失注册，ChatGPT 会继续
 复用原客户端 ID，需要恢复原 OAuth 数据库或重建客户端连接；重试 API Key 无法修复。
 
-#### 浏览器 OAuth 回归验证
-
-运行 `uv run --locked python scripts/oauth_browser_smoke.py`，在浏览器打开
-`http://localhost:8927/start`，输入终端显示的测试专用 Key。成功页面应显示
-`Browser OAuth passed` 和 `14 tools`。该脚本使用临时数据库和虚构 Key，
-不加载生产凭证、不访问真实设备；按 Ctrl+C 结束。
-
-此验证覆盖普通 HTTP 单元测试无法发现的浏览器策略：授权页必须使用
-`Referrer-Policy: same-origin`，否则 Chromium 的表单 POST 会携带 `Origin: null`
-而被来源校验拒绝。CSP 的 `form-action` 还必须允许本次已验证的客户端回调源，
-否则授权码已签发但浏览器会阻止跨站回调。不得通过接受任意 Origin、移除 CSRF
-校验或使用通配 CSP 来规避此问题。
-
 首次使用时，在 Inspector 的 **Tools** 页面依次执行以下工具，参数均为 `{}`：
 
 | 工具 | 操作 |
