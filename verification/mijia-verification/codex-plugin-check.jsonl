@@ -1,0 +1,3 @@
+{"id": "asdk_app_6ac0a93d8de88191837db7163ce340f8", "name": "米家家居", "toolNames": ["list_homes", "list_devices", "list_scenes", "list_consumables", "get_device_spec", "get_device_properties", "set_device_property", "run_device_action", "run_scene", "get_statistics", "run_speaker_command", "speaker_play", "login", "login_status"]}
+{"missingAppIds": []}
+{"installedTarget": [{"id": "asdk_app_6ac0a93d8de88191837db7163ce340f8", "runtimeName": "米家家居", "enabled": true, "callable": true}]}
