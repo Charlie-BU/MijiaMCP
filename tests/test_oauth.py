@@ -351,3 +351,45 @@ async def test_dcr_client_secret_and_optional_refresh_request(tmp_path):
         )
         assert response.status_code == 200
         assert "refresh_token" not in response.json()
+
+
+async def test_permanent_access_token_survives_future_restart_and_can_be_revoked(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("ALLOWED_API_KEYS", '["' + TEST_KEY + '"]')
+    monkeypatch.setenv("MIJIA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MIJIA_PUBLIC_URL", BASE)
+    monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_SECONDS", "-1")
+    settings = Settings.from_env()
+    async with http_client(settings) as client:
+        client_id = await register(client)
+        token = (await client.post("/token", data=await grant(client, client_id))).json()
+        assert "expires_in" not in token
+        assert "refresh_token" not in token
+    provider = OwnerOAuthProvider(BASE, tmp_path, TEST_KEYS)
+    provider.set_mcp_path("/mcp")
+    with provider.db() as db:
+        assert db.execute("SELECT expires FROM entries WHERE kind='access'").fetchone() == (None,)
+    future = time.time() + 100 * 365 * 86400
+    monkeypatch.setattr("oauth.time.time", lambda: future)
+    # Changing the configuration to finite expiry cannot shorten existing permanent grants.
+    async with http_client(Settings(TEST_KEYS, tmp_path, public_url=BASE)) as client:
+        assert (
+            await rpc(client, "tools/list", authorization="Bearer " + token["access_token"])
+        ).status_code == 200
+    access = await provider.load_access_token(token["access_token"])
+    assert access.expires_at is None
+    await provider.revoke_token(access)
+    assert await provider.load_access_token(token["access_token"]) is None
+
+
+async def test_permanent_access_token_is_invalid_after_owner_key_removal(tmp_path):
+    settings = Settings(TEST_KEYS, tmp_path, public_url=BASE, access_token_expire_seconds=-1)
+    async with http_client(settings) as client:
+        token = (
+            await client.post("/token", data=await grant(client, await register(client)))
+        ).json()
+    async with http_client(Settings((SECOND_KEY,), tmp_path, public_url=BASE)) as client:
+        assert (
+            await rpc(client, "tools/list", authorization="Bearer " + token["access_token"])
+        ).status_code == 401

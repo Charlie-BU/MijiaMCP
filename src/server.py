@@ -51,9 +51,10 @@ class Settings:
 
         if (
             type(self.access_token_expire_seconds) is not int
-            or self.access_token_expire_seconds <= 0
+            or self.access_token_expire_seconds == 0
+            or self.access_token_expire_seconds < -1
         ):
-            raise ValueError("ACCESS_TOKEN_EXPIRE_SECONDS must be a positive integer")
+            raise ValueError("ACCESS_TOKEN_EXPIRE_SECONDS must be -1 or a positive integer")
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -71,7 +72,9 @@ class Settings:
         try:
             token_expiry = int(os.getenv("ACCESS_TOKEN_EXPIRE_SECONDS", "3600"))
         except ValueError:
-            raise ValueError("ACCESS_TOKEN_EXPIRE_SECONDS must be a positive integer") from None
+            raise ValueError(
+                "ACCESS_TOKEN_EXPIRE_SECONDS must be -1 or a positive integer"
+            ) from None
         # Railway specific
         # 确保数据目录在持久卷内
         volume_path = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")

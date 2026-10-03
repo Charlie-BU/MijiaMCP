@@ -274,7 +274,7 @@ def test_adapter_restores_upstream_start_method_on_failure(tmp_path, monkeypatch
     assert server.upstream.mcp.run == original
 
 
-@pytest.mark.parametrize("expiry", ["", "0", "-1", "1.5", "secret-invalid-value"])
+@pytest.mark.parametrize("expiry", ["", "0", "-2", "1.5", "secret-invalid-value"])
 def test_invalid_token_expiry_is_rejected_without_echoing_config(expiry, monkeypatch):
     monkeypatch.setenv("ALLOWED_API_KEYS", json.dumps(TEST_KEYS))
     monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_SECONDS", expiry)

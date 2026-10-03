@@ -36,9 +36,6 @@ MIJIA_DATA_DIR=./.data
 ALLOWED_API_KEYS='["YOUR_RANDOM_API_KEY_1_AT_LEAST_32_CHARS", "YOUR_RANDOM_API_KEY_2_AT_LEAST_32_CHARS"]'
 ```
 
-服务通过 `load_dotenv(override=False)` 加载本地 `.env`，然后用 `os.getenv()` 读取配置；
-进程环境变量（例如 Railway Variables）优先，不会被 `.env` 覆盖。
-
 启动脚本会同步锁定依赖并运行服务：
 
 ```bash
@@ -97,7 +94,9 @@ Railway 自动提供 `RAILWAY_PUBLIC_DOMAIN` 时，服务默认使用该域名�
 服务提供标准认证发现、动态客户端注册、S256 PKCE 和撤销端点。
 授权码换取随机生成的 `access_token`，不使用 JWT，不签发 `refresh_token`，也不支持刷新授权。
 `ACCESS_TOKEN_EXPIRE_SECONDS` 控制新签发 access_token 的有效期，单位为秒，
-默认 `3600`（1 小时），必须为正整数。例如 `2592000` 为 30 天。
+默认 `3600`（1 小时），允许正整数或 `-1`；`-1` 表示永久有效，`0` 和其他负数拒绝启动。
+例如 `2592000` 为 30 天。永久 token 的响应不包含 `expires_in`，服务端没有时间过期限制，
+但撤销 token 或删除对应 API Key 仍会使它失效。
 返回的 `expires_in` 与服务端实际校验使用同一配置；到期后客户端需要重新授权连接。
 修改配置只影响新签发的 token，重启或调长配置不会延长已签发 token 的失效时间。
 这个配置不改变直接 Bearer API Key 或上游米家登录凭证的有效期。

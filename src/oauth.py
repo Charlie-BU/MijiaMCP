@@ -80,8 +80,12 @@ class OwnerOAuthProvider(OAuthProvider):
         *,
         access_token_expire_seconds: int = 3600,
     ):
-        if type(access_token_expire_seconds) is not int or access_token_expire_seconds <= 0:
-            raise ValueError("ACCESS_TOKEN_EXPIRE_SECONDS must be a positive integer")
+        if (
+            type(access_token_expire_seconds) is not int
+            or access_token_expire_seconds == 0
+            or access_token_expire_seconds < -1
+        ):
+            raise ValueError("ACCESS_TOKEN_EXPIRE_SECONDS must be -1 or a positive integer")
         self.access_token_expire_seconds = access_token_expire_seconds
         parsed = urlparse(base_url)
         if (
@@ -126,14 +130,20 @@ class OwnerOAuthProvider(OAuthProvider):
         db.execute("DELETE FROM entries WHERE expires <= ?", (time.time(),))
         db.execute(
             "INSERT OR REPLACE INTO entries VALUES (?,?,?,?)",
-            (kind, digest(identifier), json.dumps(body), time.time() + lifetime),
+            (
+                kind,
+                digest(identifier),
+                json.dumps(body),
+                None if lifetime is None else time.time() + lifetime,
+            ),
         )
 
     def read(self, db, kind, identifier, consume=False):
         statement = (
-            "DELETE FROM entries WHERE kind=? AND id=? AND expires>? RETURNING body"
+            "DELETE FROM entries WHERE kind=? AND id=? "
+            "AND (expires IS NULL OR expires>?) RETURNING body"
             if consume
-            else "SELECT body FROM entries WHERE kind=? AND id=? AND expires>?"
+            else "SELECT body FROM entries WHERE kind=? AND id=? AND (expires IS NULL OR expires>?)"
         )
         row = db.execute(statement, (kind, digest(identifier), time.time())).fetchone()
         return json.loads(row[0]) if row else None
@@ -353,19 +363,22 @@ autocomplete="off" maxlength="4096"></label>
         if not self.owner_valid(record["owner_digest"]):
             raise TokenError("invalid_grant", "Owner credential is no longer valid.")
         access_token = secrets.token_urlsafe(32)
+        lifetime = (
+            None if self.access_token_expire_seconds == -1 else self.access_token_expire_seconds
+        )
         value = {
             "client_id": client.client_id,
             "scopes": record["scopes"],
             "resource": str(self._resource_url),
             "subject": "myhome-owner",
             "owner_digest": record["owner_digest"],
-            "expires_at": int(time.time()) + self.access_token_expire_seconds,
+            "expires_at": None if lifetime is None else int(time.time()) + lifetime,
         }
-        self.save(db, "access", access_token, value, self.access_token_expire_seconds)
+        self.save(db, "access", access_token, value, lifetime)
         return OAuthToken(
             access_token=access_token,
             token_type="Bearer",
-            expires_in=self.access_token_expire_seconds,
+            expires_in=lifetime,
             scope=" ".join(record["scopes"]),
         )
 
@@ -389,7 +402,7 @@ autocomplete="off" maxlength="4096"></label>
             record = self.read(db, "access", token)
         if (
             not record
-            or record["expires_at"] <= time.time()
+            or (record["expires_at"] is not None and record["expires_at"] <= time.time())
             or not self.owner_valid(record["owner_digest"])
             or record["resource"] != str(self._resource_url)
         ):
