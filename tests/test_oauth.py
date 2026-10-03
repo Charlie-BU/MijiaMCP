@@ -28,7 +28,7 @@ async def register(client, callback=CALLBACK):
             "redirect_uris": [callback],
             "client_name": "Test client <script>",
             "token_endpoint_auth_method": "none",
-            "grant_types": ["authorization_code", "refresh_token"],
+            "grant_types": ["authorization_code"],
             "response_types": ["code"],
             "scope": "mijia",
         },
@@ -102,6 +102,7 @@ async def test_discovery_existing_keys_and_oauth_only_after_owner_consent(tmp_pa
         metadata = (await client.get("/.well-known/oauth-authorization-server")).json()
         assert metadata["registration_endpoint"] == BASE + "/register"
         assert metadata["code_challenge_methods_supported"] == ["S256"]
+        assert metadata["grant_types_supported"] == ["authorization_code"]
         assert (await rpc(client, "tools/list")).status_code == 200
         client_id = await register(client)
         fields = await consent_page(client, client_id)
@@ -121,6 +122,8 @@ async def test_discovery_existing_keys_and_oauth_only_after_owner_consent(tmp_pa
         token = await client.post("/token", data=data)
         assert token.status_code == 200, token.text
         token = token.json()
+        assert "refresh_token" not in token
+        assert token["expires_in"] == 3600
         tools = await rpc(client, "tools/list", authorization="Bearer " + token["access_token"])
         assert len(tools.json()["result"]["tools"]) == 14
         assert (await client.post("/token", data=data)).status_code == 401
@@ -130,7 +133,6 @@ async def test_discovery_existing_keys_and_oauth_only_after_owner_consent(tmp_pa
             SECOND_KEY,
             data["code"],
             token["access_token"],
-            token["refresh_token"],
         ]:
             assert secret.encode() not in db
         assert (tmp_path / "oauth.sqlite3").stat().st_mode & 0o777 == 0o600
@@ -143,22 +145,32 @@ async def test_discovery_existing_keys_and_oauth_only_after_owner_consent(tmp_pa
         refresh = {
             "grant_type": "refresh_token",
             "client_id": client_id,
-            "refresh_token": token["refresh_token"],
+            "refresh_token": "not-issued",
             "resource": RESOURCE,
         }
-        new = await client.post("/token", data=refresh)
-        assert new.status_code == 200, new.text
-        new_token = new.json()["access_token"]
+        denied = await client.post("/token", data=refresh)
+        assert denied.status_code == 400
+        assert denied.json()["error"] == "unsupported_grant_type"
         assert (
             await rpc(client, "tools/list", authorization="Bearer " + token["access_token"])
-        ).status_code == 401
-        assert (
-            await rpc(client, "tools/list", authorization="Bearer " + new_token)
         ).status_code == 200
-        assert (await client.post("/token", data=refresh)).status_code == 401
-        # Refresh replay revokes the whole grant.
+        provider = OwnerOAuthProvider(BASE, tmp_path, TEST_KEYS)
+        with provider.db() as db:
+            assert not db.execute(
+                "SELECT 1 FROM entries WHERE kind IN ('refresh', 'used_refresh')"
+            ).fetchone()
+        revoked = await client.post(
+            "/revoke",
+            data={
+                "client_id": client_id,
+                "token": token["access_token"],
+                "token_type_hint": "access_token",
+                "client_secret": "",
+            },
+        )
+        assert revoked.status_code == 200
         assert (
-            await rpc(client, "tools/list", authorization="Bearer " + new_token)
+            await rpc(client, "tools/list", authorization="Bearer " + token["access_token"])
         ).status_code == 401
 
 
@@ -206,12 +218,6 @@ async def test_expiry_wrong_client_callback_resource_and_key_rotation(tmp_path):
         assert (
             await rpc(client, "tools/list", authorization="Bearer " + token["access_token"])
         ).status_code == 401
-        refresh = {
-            "grant_type": "refresh_token",
-            "client_id": client_id,
-            "refresh_token": token["refresh_token"],
-        }
-        assert (await client.post("/token", data=refresh)).status_code == 401
 
 
 async def test_consent_cookie_origin_denial_and_unregistered_redirects(tmp_path):
@@ -239,7 +245,7 @@ async def test_consent_cookie_origin_denial_and_unregistered_redirects(tmp_path)
             "/register",
             json={
                 "redirect_uris": ["http://public.invalid/callback"],
-                "grant_types": ["authorization_code", "refresh_token"],
+                "grant_types": ["authorization_code"],
                 "response_types": ["code"],
             },
         )
@@ -282,18 +288,66 @@ async def test_registration_rejects_csp_source_metacharacters(tmp_path, callback
             json={
                 "redirect_uris": [callback],
                 "token_endpoint_auth_method": "none",
-                "grant_types": ["authorization_code", "refresh_token"],
+                "grant_types": ["authorization_code"],
                 "response_types": ["code"],
             },
         )
         assert response.status_code == 400
 
 
-def test_railway_domain_enables_oauth_without_extra_credentials():
-    settings = Settings.from_env(
-        {
-            "ALLOWED_API_KEYS": '["' + TEST_KEY + '"]',
-            "RAILWAY_PUBLIC_DOMAIN": "mijiamcp-production.up.railway.app",
-        }
-    )
+def test_railway_domain_enables_oauth_without_extra_credentials(monkeypatch):
+    monkeypatch.setenv("ALLOWED_API_KEYS", '["' + TEST_KEY + '"]')
+    monkeypatch.setenv("RAILWAY_PUBLIC_DOMAIN", "mijiamcp-production.up.railway.app")
+    settings = Settings.from_env()
     assert settings.public_url == "https://mijiamcp-production.up.railway.app"
+
+
+async def test_environment_token_lifetime_is_enforced_across_restart(tmp_path, monkeypatch):
+    monkeypatch.setenv("ALLOWED_API_KEYS", '["' + TEST_KEY + '"]')
+    monkeypatch.setenv("MIJIA_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("MIJIA_PUBLIC_URL", BASE)
+    monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_SECONDS", "120")
+    settings = Settings.from_env()
+    assert settings.access_token_expire_seconds == 120
+    async with http_client(settings) as client:
+        client_id = await register(client)
+        data = await grant(client, client_id)
+        started = int(time.time())
+        token = (await client.post("/token", data=data)).json()
+        assert token["expires_in"] == 120
+        assert "refresh_token" not in token
+    # A changed setting affects new grants, never extends an existing grant.
+    monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_SECONDS", "86400")
+    provider = OwnerOAuthProvider(BASE, tmp_path, TEST_KEYS, access_token_expire_seconds=86400)
+    provider.set_mcp_path("/mcp")
+    access = await provider.load_access_token(token["access_token"])
+    assert started + 120 <= access.expires_at <= int(time.time()) + 120
+    monkeypatch.setattr("oauth.time.time", lambda: started + 122)
+    async with http_client(Settings.from_env()) as client:
+        assert (
+            await rpc(client, "tools/list", authorization="Bearer " + token["access_token"])
+        ).status_code == 401
+
+
+async def test_dcr_client_secret_and_optional_refresh_request(tmp_path):
+    async with http_client(Settings(TEST_KEYS, tmp_path, public_url=BASE)) as client:
+        response = await client.post(
+            "/register",
+            json={
+                "redirect_uris": [CALLBACK],
+                "token_endpoint_auth_method": "client_secret_post",
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+            },
+        )
+        assert response.status_code == 201
+        info = response.json()
+        assert info["grant_types"] == ["authorization_code"]
+        assert info["client_secret_expires_at"] == 0
+        data = await grant(client, info["client_id"])
+        assert (await client.post("/token", data=data)).status_code == 401
+        response = await client.post(
+            "/token", data={**data, "client_secret": info["client_secret"]}
+        )
+        assert response.status_code == 200
+        assert "refresh_token" not in response.json()

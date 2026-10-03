@@ -8,6 +8,7 @@ license = "GPL-3.0-or-later"
 dependencies = [
     "mijiaAPI[mcp]==4.4.0",
     "fastmcp==3.4.7",
+    "python-dotenv==1.2.4",
 ]
 
 [dependency-groups]

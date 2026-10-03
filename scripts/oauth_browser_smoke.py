@@ -34,7 +34,7 @@ async def start(request):
                 "redirect_uris": [CALLBACK],
                 "client_name": "Browser regression test",
                 "token_endpoint_auth_method": "none",
-                "grant_types": ["authorization_code", "refresh_token"],
+                "grant_types": ["authorization_code"],
                 "response_types": ["code"],
                 "scope": "mijia",
             },

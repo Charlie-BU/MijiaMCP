@@ -6,17 +6,20 @@ import hashlib
 import hmac
 import json
 import os
-from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import mijiaAPI.mcp_server as upstream
+from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, MultiAuth, TokenVerifier
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from oauth import SCOPE, OwnerOAuthProvider
+
+# 本地加载 .env，部署平台已设置的环境变量优先。
+load_dotenv(override=False)
 
 
 @dataclass(frozen=True)
@@ -28,6 +31,7 @@ class Settings:
     data_dir: Path = Path("./.data")
     port: int = 8080
     public_url: str | None = None
+    access_token_expire_seconds: int = 3600
 
     def __post_init__(self) -> None:
         """校验 API Key 和端口，阻止无效配置启动服务。"""
@@ -45,23 +49,34 @@ class Settings:
         if not 1 <= self.port <= 65535:
             raise ValueError("APP_PORT must be an integer between 1 and 65535")
 
+        if (
+            type(self.access_token_expire_seconds) is not int
+            or self.access_token_expire_seconds <= 0
+        ):
+            raise ValueError("ACCESS_TOKEN_EXPIRE_SECONDS must be a positive integer")
+
     @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> Settings:
+    def from_env(cls) -> Settings:
         """从环境变量读取服务配置。"""
-        env = os.environ if environ is None else environ
         try:
-            keys = json.loads(env.get("ALLOWED_API_KEYS", ""))
+            keys = json.loads(os.getenv("ALLOWED_API_KEYS", ""))
         except json.JSONDecodeError:
             raise ValueError("ALLOWED_API_KEYS must be a non-empty JSON array of strings") from None
         if not isinstance(keys, list):
             raise ValueError("ALLOWED_API_KEYS must be a non-empty JSON array of strings")
         try:
-            port = int(env.get("APP_PORT", "8080"))
+            port = int(os.getenv("APP_PORT", "8080"))
         except ValueError:
             raise ValueError("APP_PORT must be an integer between 1 and 65535") from None
-        volume_path = env.get("RAILWAY_VOLUME_MOUNT_PATH")
-        data_dir = Path(env.get("MIJIA_DATA_DIR") or volume_path or "./.data")
-        if env.get("RAILWAY_ENVIRONMENT_ID"):
+        try:
+            token_expiry = int(os.getenv("ACCESS_TOKEN_EXPIRE_SECONDS", "3600"))
+        except ValueError:
+            raise ValueError("ACCESS_TOKEN_EXPIRE_SECONDS must be a positive integer") from None
+        # Railway specific
+        # 确保数据目录在持久卷内
+        volume_path = os.getenv("RAILWAY_VOLUME_MOUNT_PATH")
+        data_dir = Path(os.getenv("MIJIA_DATA_DIR") or volume_path or "./.data")
+        if os.getenv("RAILWAY_ENVIRONMENT_ID"):
             if not volume_path:
                 raise ValueError("Railway requires a persistent volume for Mijia and OAuth state")
             if not data_dir.resolve().is_relative_to(Path(volume_path).resolve()):
@@ -70,10 +85,11 @@ class Settings:
             allowed_api_keys=tuple(keys),
             data_dir=data_dir,
             port=port,
-            public_url=env.get("MIJIA_PUBLIC_URL")
+            access_token_expire_seconds=token_expiry,
+            public_url=os.getenv("MIJIA_PUBLIC_URL")
             or (
-                "https://" + env["RAILWAY_PUBLIC_DOMAIN"]
-                if env.get("RAILWAY_PUBLIC_DOMAIN")
+                "https://" + os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
+                if os.getenv("RAILWAY_PUBLIC_DOMAIN")
                 else None
             ),
         )
@@ -129,7 +145,10 @@ def create_server(settings: Settings) -> FastMCP:
     if settings.public_url:
         auth = MultiAuth(
             server=OwnerOAuthProvider(
-                settings.public_url, settings.data_dir, settings.allowed_api_keys
+                settings.public_url,
+                settings.data_dir,
+                settings.allowed_api_keys,
+                access_token_expire_seconds=settings.access_token_expire_seconds,
             ),
             verifiers=[verifier],
         )

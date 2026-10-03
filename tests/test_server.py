@@ -24,6 +24,17 @@ HEADERS = {
 @pytest.fixture(autouse=True)
 def reset_upstream(monkeypatch):
     """重置米家模块状态，隔离各项测试的账号和登录线程。"""
+    for name in (
+        "ALLOWED_API_KEYS",
+        "APP_PORT",
+        "MIJIA_DATA_DIR",
+        "MIJIA_PUBLIC_URL",
+        "RAILWAY_ENVIRONMENT_ID",
+        "RAILWAY_VOLUME_MOUNT_PATH",
+        "RAILWAY_PUBLIC_DOMAIN",
+        "ACCESS_TOKEN_EXPIRE_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
     for name in ("_api", "_auth_path", "_login_api", "_login_data", "_login_thread"):
         monkeypatch.setattr(server.upstream, name, None)
     monkeypatch.setattr(server.upstream, "_login_status", {"status": "idle"})
@@ -71,21 +82,26 @@ async def rpc(client, method, params=None, authorization=f"Bearer {TEST_KEY}"):
         json.dumps([TEST_KEY, "short"]),
     ],
 )
-def test_startup_rejects_missing_or_invalid_keys_without_echoing_them(raw_keys):
+def test_startup_rejects_missing_or_invalid_keys_without_echoing_them(raw_keys, monkeypatch):
     """验证缺失或无效密钥数组被拒绝且错误不泄漏配置内容。"""
-    env = {} if raw_keys is None else {"ALLOWED_API_KEYS": raw_keys}
+    if raw_keys is None:
+        monkeypatch.delenv("ALLOWED_API_KEYS", raising=False)
+    else:
+        monkeypatch.setenv("ALLOWED_API_KEYS", raw_keys)
     with pytest.raises(ValueError, match="ALLOWED_API_KEYS") as error:
-        Settings.from_env(env)
+        Settings.from_env()
     if raw_keys:
         assert raw_keys not in str(error.value)
     assert TEST_KEY not in str(error.value)
 
 
 @pytest.mark.parametrize("port", ["nope", "0", "65536"])
-def test_invalid_port_is_rejected(port):
+def test_invalid_port_is_rejected(port, monkeypatch):
     """验证非法监听端口无法通过配置校验。"""
+    monkeypatch.setenv("ALLOWED_API_KEYS", json.dumps(TEST_KEYS))
+    monkeypatch.setenv("APP_PORT", port)
     with pytest.raises(ValueError, match="APP_PORT"):
-        Settings.from_env({"ALLOWED_API_KEYS": json.dumps(TEST_KEYS), "APP_PORT": port})
+        Settings.from_env()
 
 
 async def test_verifier_and_settings_do_not_expose_plaintext_key():
@@ -99,18 +115,19 @@ async def test_verifier_and_settings_do_not_expose_plaintext_key():
     assert await verifier.verify_token(TEST_KEY + "extra") is None
 
 
-def test_railway_requires_persistent_state():
-    env = {"ALLOWED_API_KEYS": json.dumps(TEST_KEYS), "RAILWAY_ENVIRONMENT_ID": "test-env"}
+def test_railway_requires_persistent_state(monkeypatch):
+    monkeypatch.setenv("ALLOWED_API_KEYS", json.dumps(TEST_KEYS))
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT_ID", "test-env")
     with pytest.raises(ValueError, match="persistent volume"):
-        Settings.from_env(env)
-    env["RAILWAY_VOLUME_MOUNT_PATH"] = "/data"
-    assert Settings.from_env(env).data_dir == Path("/data")
+        Settings.from_env()
+    monkeypatch.setenv("RAILWAY_VOLUME_MOUNT_PATH", "/data")
+    assert Settings.from_env().data_dir == Path("/data")
     for path in ["./.data", "/data-other", "/data/../temporary"]:
+        monkeypatch.setenv("MIJIA_DATA_DIR", path)
         with pytest.raises(ValueError, match="inside the Railway persistent volume"):
-            Settings.from_env({**env, "MIJIA_DATA_DIR": path})
-    assert Settings.from_env({**env, "MIJIA_DATA_DIR": "/data/mijia"}).data_dir == Path(
-        "/data/mijia"
-    )
+            Settings.from_env()
+    monkeypatch.setenv("MIJIA_DATA_DIR", "/data/mijia")
+    assert Settings.from_env().data_dir == Path("/data/mijia")
 
 
 @pytest.mark.parametrize("authorization", [None, "Bearer wrong", f"Basic {TEST_KEY}"])
@@ -136,14 +153,13 @@ async def test_all_mcp_requests_require_correct_bearer_key(tmp_path, authorizati
 
 
 @pytest.mark.parametrize("keys", [(TEST_KEY,), TEST_KEYS])
-async def test_health_and_real_upstream_tools_are_available_before_xiaomi_login(tmp_path, keys):
+async def test_health_and_real_upstream_tools_are_available_before_xiaomi_login(
+    tmp_path, keys, monkeypatch
+):
     """验证未登录时健康检查和工具发现可用，设备查询被拒绝。"""
-    settings = Settings.from_env(
-        {
-            "ALLOWED_API_KEYS": json.dumps(keys),
-            "MIJIA_DATA_DIR": str(tmp_path),
-        }
-    )
+    monkeypatch.setenv("ALLOWED_API_KEYS", json.dumps(keys))
+    monkeypatch.setenv("MIJIA_DATA_DIR", str(tmp_path))
+    settings = Settings.from_env()
     async with http_client(settings) as client:
         health = await client.get("/health")
         assert health.status_code == 200
@@ -256,3 +272,13 @@ def test_adapter_restores_upstream_start_method_on_failure(tmp_path, monkeypatch
     with pytest.raises(RuntimeError, match="Initialization failed"):
         create_server(Settings(TEST_KEYS, tmp_path))
     assert server.upstream.mcp.run == original
+
+
+@pytest.mark.parametrize("expiry", ["", "0", "-1", "1.5", "secret-invalid-value"])
+def test_invalid_token_expiry_is_rejected_without_echoing_config(expiry, monkeypatch):
+    monkeypatch.setenv("ALLOWED_API_KEYS", json.dumps(TEST_KEYS))
+    monkeypatch.setenv("ACCESS_TOKEN_EXPIRE_SECONDS", expiry)
+    with pytest.raises(ValueError, match="ACCESS_TOKEN_EXPIRE_SECONDS") as error:
+        Settings.from_env()
+    if expiry:
+        assert expiry not in str(error.value)

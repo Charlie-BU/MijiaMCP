@@ -630,6 +630,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "fastmcp" },
     { name = "mijiaapi", extra = ["mcp"] },
+    { name = "python-dotenv" },
 ]
 
 [package.dev-dependencies]
@@ -643,6 +644,7 @@ dev = [
 requires-dist = [
     { name = "fastmcp", specifier = "==3.4.7" },
     { name = "mijiaapi", extras = ["mcp"], specifier = "==4.4.0" },
+    { name = "python-dotenv", specifier = "==1.2.4" },
 ]
 
 [package.metadata.requires-dev]

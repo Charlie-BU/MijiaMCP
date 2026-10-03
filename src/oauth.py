@@ -12,22 +12,29 @@ import sqlite3
 import time
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
+from uuid import uuid4
 
 from fastmcp.server.auth import AccessToken, OAuthProvider
 from fastmcp.server.auth.auth import TokenHandler
+from mcp.server.auth.handlers.metadata import MetadataHandler
+from mcp.server.auth.json_response import PydanticJSONResponse
 from mcp.server.auth.middleware.client_auth import ClientAuthenticator
 from mcp.server.auth.provider import (
     AuthorizationCode,
     AuthorizationParams,
     AuthorizeError,
-    RefreshToken,
     RegistrationError,
     TokenError,
     construct_redirect_uri,
 )
-from mcp.server.auth.routes import cors_middleware
+from mcp.server.auth.routes import build_metadata, cors_middleware
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
-from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
+from mcp.server.transport_security import (
+    DEFAULT_MAX_REQUEST_BODY_SIZE,
+    RequestBodyLimitMiddleware,
+)
+from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+from pydantic import ValidationError
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
@@ -65,7 +72,17 @@ def consent_headers(redirect_uri: str) -> dict[str, str]:
 class OwnerOAuthProvider(OAuthProvider):
     """Use SDK protocol handlers; retain only hashed bearer secrets in SQLite."""
 
-    def __init__(self, base_url: str, data_dir: Path, allowed_api_keys: tuple[str, ...]):
+    def __init__(
+        self,
+        base_url: str,
+        data_dir: Path,
+        allowed_api_keys: tuple[str, ...],
+        *,
+        access_token_expire_seconds: int = 3600,
+    ):
+        if type(access_token_expire_seconds) is not int or access_token_expire_seconds <= 0:
+            raise ValueError("ACCESS_TOKEN_EXPIRE_SECONDS must be a positive integer")
+        self.access_token_expire_seconds = access_token_expire_seconds
         parsed = urlparse(base_url)
         if (
             parsed.username
@@ -98,6 +115,8 @@ class OwnerOAuthProvider(OAuthProvider):
                 "CREATE TABLE IF NOT EXISTS entries "
                 "(kind TEXT, id TEXT, body TEXT, expires REAL, PRIMARY KEY(kind,id))"
             )
+            # Refresh grants are no longer supported, including grants from previous deployments.
+            db.execute("DELETE FROM entries WHERE kind IN ('refresh', 'used_refresh')")
         self.db_path.chmod(0o600)
 
     def db(self):
@@ -125,6 +144,8 @@ class OwnerOAuthProvider(OAuthProvider):
     async def get_client(self, client_id):
         with self.db() as db:
             record = self.read(db, "client", client_id)
+        if record:
+            record["grant_types"] = ["authorization_code"]
         return OAuthClientInformationFull.model_validate(record) if record else None
 
     async def register_client(self, client_info):
@@ -159,6 +180,43 @@ class OwnerOAuthProvider(OAuthProvider):
                 client_info.model_dump(mode="json"),
                 365 * 86400,
             )
+
+    async def register(self, request):
+        """DCR without the SDK handler's mandatory refresh_token grant requirement."""
+        try:
+            metadata = OAuthClientMetadata.model_validate(await request.json())
+        except (ValidationError, ValueError):
+            return JSONResponse({"error": "invalid_client_metadata"}, status_code=400)
+        if (
+            "authorization_code" not in metadata.grant_types
+            or "code" not in metadata.response_types
+        ):
+            return JSONResponse({"error": "invalid_client_metadata"}, status_code=400)
+        if set((metadata.scope or SCOPE).split()) != {SCOPE}:
+            return JSONResponse({"error": "invalid_client_metadata"}, status_code=400)
+        # A client may request optional refresh support; register only the supported grant.
+        metadata.grant_types = ["authorization_code"]
+        metadata.scope = SCOPE
+        metadata.token_endpoint_auth_method = (
+            metadata.token_endpoint_auth_method or "client_secret_post"
+        )
+        client = OAuthClientInformationFull(
+            **metadata.model_dump(),
+            client_id=str(uuid4()),
+            client_id_issued_at=int(time.time()),
+            client_secret=None
+            if metadata.token_endpoint_auth_method == "none"
+            else secrets.token_hex(32),
+            client_secret_expires_at=0,
+        )
+        try:
+            await self.register_client(client)
+        except RegistrationError as error:
+            return JSONResponse(
+                {"error": error.error, "error_description": error.error_description},
+                status_code=400,
+            )
+        return PydanticJSONResponse(content=client, status_code=201)
 
     async def authorize(self, client, params):
         if params.resource not in {None, str(self._resource_url)}:
@@ -291,33 +349,24 @@ autocomplete="off" maxlength="4096"></label>
             return None
         return AuthorizationCode(code=authorization_code, **record)
 
-    def mint(self, db, client, record, scopes):
+    def mint(self, db, client, record):
         if not self.owner_valid(record["owner_digest"]):
             raise TokenError("invalid_grant", "Owner credential is no longer valid.")
-        access, refresh = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
-        family = record.get("family", secrets.token_urlsafe(32))
+        access_token = secrets.token_urlsafe(32)
         value = {
             "client_id": client.client_id,
-            "scopes": scopes,
+            "scopes": record["scopes"],
             "resource": str(self._resource_url),
             "subject": "myhome-owner",
             "owner_digest": record["owner_digest"],
-            "family": family,
+            "expires_at": int(time.time()) + self.access_token_expire_seconds,
         }
-        self.save(db, "access", access, {**value, "expires_at": int(time.time()) + 3600}, 3600)
-        self.save(
-            db,
-            "refresh",
-            refresh,
-            {**value, "expires_at": int(time.time()) + 30 * 86400},
-            30 * 86400,
-        )
+        self.save(db, "access", access_token, value, self.access_token_expire_seconds)
         return OAuthToken(
-            access_token=access,
+            access_token=access_token,
             token_type="Bearer",
-            expires_in=3600,
-            refresh_token=refresh,
-            scope=" ".join(scopes),
+            expires_in=self.access_token_expire_seconds,
+            scope=" ".join(record["scopes"]),
         )
 
     async def exchange_authorization_code(self, client, authorization_code):
@@ -326,40 +375,21 @@ autocomplete="off" maxlength="4096"></label>
             record = self.read(db, "code", authorization_code.code, consume=True)
             if not record or record["client_id"] != client.client_id:
                 raise TokenError("invalid_grant", "Authorization code is expired or already used.")
-            return self.mint(db, client, record, record["scopes"])
+            return self.mint(db, client, record)
 
     async def load_refresh_token(self, client, refresh_token):
-        with self.db() as db:
-            record = self.read(db, "refresh", refresh_token)
-            used = self.read(db, "used_refresh", refresh_token)
-            if used and used["client_id"] == client.client_id:
-                self.revoke_family(db, used["family"])
-        if not record or record["client_id"] != client.client_id:
-            return None
-        return RefreshToken(token=refresh_token, **record)
-
-    def revoke_family(self, db, family):
-        db.execute(
-            "DELETE FROM entries WHERE kind IN ('access','refresh') "
-            "AND json_extract(body,'$.family')=?",
-            (family,),
-        )
+        # Required provider interface; this server issues only access_token.
+        return None
 
     async def exchange_refresh_token(self, client, refresh_token, scopes):
-        with self.db() as db:
-            db.execute("BEGIN IMMEDIATE")
-            record = self.read(db, "refresh", refresh_token.token, consume=True)
-            if not record or record["client_id"] != client.client_id:
-                raise TokenError("invalid_grant", "Refresh token is expired or already used.")
-            self.revoke_family(db, record["family"])
-            self.save(db, "used_refresh", refresh_token.token, record, 30 * 86400)
-            return self.mint(db, client, record, scopes)
+        raise TokenError("unsupported_grant_type", "Refresh tokens are not supported.")
 
     async def load_access_token(self, token):
         with self.db() as db:
             record = self.read(db, "access", token)
         if (
             not record
+            or record["expires_at"] <= time.time()
             or not self.owner_valid(record["owner_digest"])
             or record["resource"] != str(self._resource_url)
         ):
@@ -368,14 +398,35 @@ autocomplete="off" maxlength="4096"></label>
 
     async def revoke_token(self, token):
         with self.db() as db:
-            record = self.read(
-                db, "refresh" if isinstance(token, RefreshToken) else "access", token.token
-            )
-            if record:
-                self.revoke_family(db, record["family"])
+            db.execute("DELETE FROM entries WHERE kind='access' AND id=?", (digest(token.token),))
 
     def get_routes(self, mcp_path=None):
         routes = super().get_routes(mcp_path)
+        metadata = build_metadata(
+            self.base_url, None, self.client_registration_options, self.revocation_options
+        )
+        metadata.grant_types_supported = ["authorization_code"]
+        metadata.token_endpoint_auth_methods_supported = [
+            "none",
+            "client_secret_post",
+            "client_secret_basic",
+        ]
+        for index, route in enumerate(routes):
+            if route.path == "/.well-known/oauth-authorization-server":
+                routes[index] = Route(
+                    route.path,
+                    cors_middleware(MetadataHandler(metadata).handle, ["GET", "OPTIONS"]),
+                    methods=["GET", "OPTIONS"],
+                )
+            elif route.path == "/register":
+                routes[index] = Route(
+                    route.path,
+                    RequestBodyLimitMiddleware(
+                        cors_middleware(self.register, ["POST", "OPTIONS"]),
+                        DEFAULT_MAX_REQUEST_BODY_SIZE,
+                    ),
+                    methods=["POST", "OPTIONS"],
+                )
         for route in routes:
             if route.path == "/token":
                 endpoint = TokenHandler(
@@ -385,6 +436,12 @@ autocomplete="off" maxlength="4096"></label>
                 async def resource_bound_token(request):
                     if request.method == "POST":
                         form = await request.form()
+                        if form.get("grant_type") != "authorization_code":
+                            return JSONResponse(
+                                {"error": "unsupported_grant_type"},
+                                status_code=400,
+                                headers={"Cache-Control": "no-store"},
+                            )
                         if form.get("resource") not in {None, str(self._resource_url)}:
                             return JSONResponse(
                                 {"error": "invalid_target"},
@@ -395,7 +452,10 @@ autocomplete="off" maxlength="4096"></label>
 
                 routes[routes.index(route)] = Route(
                     "/token",
-                    cors_middleware(resource_bound_token, ["POST", "OPTIONS"]),
+                    RequestBodyLimitMiddleware(
+                        cors_middleware(resource_bound_token, ["POST", "OPTIONS"]),
+                        DEFAULT_MAX_REQUEST_BODY_SIZE,
+                    ),
                     methods=["POST", "OPTIONS"],
                 )
                 break

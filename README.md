@@ -36,6 +36,9 @@ MIJIA_DATA_DIR=./.data
 ALLOWED_API_KEYS='["YOUR_RANDOM_API_KEY_1_AT_LEAST_32_CHARS", "YOUR_RANDOM_API_KEY_2_AT_LEAST_32_CHARS"]'
 ```
 
+服务通过 `load_dotenv(override=False)` 加载本地 `.env`，然后用 `os.getenv()` 读取配置；
+进程环境变量（例如 Railway Variables）优先，不会被 `.env` 覆盖。
+
 启动脚本会同步锁定依赖并运行服务：
 
 ```bash
@@ -91,12 +94,17 @@ Railway 自动提供 `RAILWAY_PUBLIC_DOMAIN` 时，服务默认使用该域名�
 点击“授权连接”。API Key 只发送到本服务，不传给客户端；客户端收到专属短期令牌。
 这次授权与后续米家账号扫码登录是两个独立步骤。
 
-服务提供标准认证发现、动态客户端注册、S256 PKCE、撤销和刷新端点。
-访问令牌有效期为 1 小时，刷新令牌为 30 天；刷新令牌轮换，重放会撤销整组令牌。
+服务提供标准认证发现、动态客户端注册、S256 PKCE 和撤销端点。
+授权码换取随机生成的 `access_token`，不使用 JWT，不签发 `refresh_token`，也不支持刷新授权。
+`ACCESS_TOKEN_EXPIRE_SECONDS` 控制新签发 access_token 的有效期，单位为秒，
+默认 `3600`（1 小时），必须为正整数。例如 `2592000` 为 30 天。
+返回的 `expires_in` 与服务端实际校验使用同一配置；到期后客户端需要重新授权连接。
+修改配置只影响新签发的 token，重启或调长配置不会延长已签发 token 的失效时间。
+这个配置不改变直接 Bearer API Key 或上游米家登录凭证的有效期。
 令牌绑定本服务的 `/mcp` 资源和 `mijia` scope。现有 Key 客户端保持兼容。
 删除 `ALLOWED_API_KEYS` 中某个 Key 后，该 Key 授权的 OAuth 令牌也会失效。
 
-OAuth 状态持久化到 `MIJIA_DATA_DIR/oauth.sqlite3`，权限为 `0600`；令牌和授权码只存摘要。
+客户端注册、授权码和 access_token 状态持久化到 `MIJIA_DATA_DIR/oauth.sqlite3`，权限为 `0600`；令牌和授权码只存摘要。
 Railway 需保持原有 `/data` Volume 挂载，确保重启后保留客户端注册与授权状态。
 不要提交该数据库、米家凭证或真实 API Key 到仓库或插件包。
 

@@ -33,4 +33,4 @@ echo "    服务地址：http://127.0.0.1:8080/mcp"
 echo "    健康检查：http://127.0.0.1:8080/health"
 echo "    按 Ctrl+C 停止服务"
 echo ""
-uv run --locked --env-file .env python src/server.py
+uv run --locked python src/server.py
