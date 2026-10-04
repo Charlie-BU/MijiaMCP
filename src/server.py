@@ -8,6 +8,7 @@ import json
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 import mijiaAPI.mcp_server as upstream
@@ -16,6 +17,7 @@ from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, MultiAuth, TokenVerifier
 from fastmcp.server.providers.fastmcp_provider import FastMCPProvider
 from fastmcp.server.transforms import Visibility
+from mijiaAPI.devices import mijiaDevice
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
@@ -134,6 +136,9 @@ def _skip_stdio(**kwargs) -> None:
 
 def create_server(settings: Settings) -> FastMCP:
     """初始化米家凭证，挂载受密钥保护的工具及健康检查。"""
+    # Override the MCP module's constructor without modifying the installed package.
+    # All property and action tools (including speakers) use this shared binding.
+    upstream.mijiaDevice = partial(mijiaDevice, sleep_time=0)
     settings.data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     auth_path = settings.data_dir / "auth.json"
     if auth_path.exists():
