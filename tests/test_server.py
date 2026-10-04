@@ -216,6 +216,7 @@ async def test_qr_login_survives_separate_http_requests_and_credentials_reload(
             """根据测试凭证文件模拟米家登录状态。"""
             self.path = auth_data_path
             self.available = auth_data_path.exists()
+            self.auth_data = {"userId": "test-user"}
 
         def _get_qr_login_data(self):
             """返回测试用二维码链接。"""

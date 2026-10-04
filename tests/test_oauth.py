@@ -296,6 +296,7 @@ async def test_registration_rejects_csp_source_metacharacters(tmp_path, callback
 
 
 def test_railway_domain_enables_oauth_without_extra_credentials(monkeypatch):
+    monkeypatch.delenv("MIJIA_PUBLIC_URL", raising=False)
     monkeypatch.setenv("ALLOWED_API_KEYS", '["' + TEST_KEY + '"]')
     monkeypatch.setenv("RAILWAY_PUBLIC_DOMAIN", "mijiamcp-production.up.railway.app")
     settings = Settings.from_env()

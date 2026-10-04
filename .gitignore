@@ -7,6 +7,11 @@ data/
 auth.json
 oauth.sqlite3*
 **/auth.json
+**/list_homes.json
+**/list_devices.json
+**/list_scenes.json
+**/list_consumables.json
+**/.list_*.tmp
 __pycache__/
 *.py[cod]
 .pytest_cache/

@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -13,9 +14,12 @@ import mijiaAPI.mcp_server as upstream
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.auth import AccessToken, MultiAuth, TokenVerifier
+from fastmcp.server.providers.fastmcp_provider import FastMCPProvider
+from fastmcp.server.transforms import Visibility
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from list_cache import LIST_TOOLS, ListCache, register_list_tools
 from oauth import SCOPE, OwnerOAuthProvider
 
 # 本地加载 .env，部署平台已设置的环境变量优先。
@@ -155,8 +159,23 @@ def create_server(settings: Settings) -> FastMCP:
             ),
             verifiers=[verifier],
         )
-    server = FastMCP("MyHome Mijia", auth=auth)
-    server.mount(upstream.mcp)
+    cache = ListCache(settings.data_dir)
+
+    @asynccontextmanager
+    async def lifespan(server):
+        try:
+            yield
+        finally:
+            cache.close()
+
+    server = FastMCP("MyHome Mijia", auth=auth, lifespan=lifespan)
+    # Hide upstream list tools only on this mount, avoiding duplicate tool names
+    # without changing the shared upstream server or its device-control tools.
+    provider = FastMCPProvider(upstream.mcp).wrap_transform(
+        Visibility(False, names=LIST_TOOLS, components={"tool"})
+    )
+    server.add_provider(provider)
+    register_list_tools(server, cache)
 
     @server.custom_route("/health", methods=["GET"])
     async def health(request: Request) -> JSONResponse:

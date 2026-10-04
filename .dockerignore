@@ -3,3 +3,5 @@
 !uv.lock
 !src/
 !src/server.py
+!src/oauth.py
+!src/list_cache.py
